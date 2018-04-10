@@ -104,7 +104,7 @@ def SetupOptionParser(argv):
     help='Full email address of user or group to act against')
   action_choices = ['backup','restore', 'restore-group', 'restore-mbox',
     'count', 'purge', 'purge-labels', 'estimate', 'quota', 'reindex', 'revoke',
-    'split-mbox', 'create-project', 'check-service-account']
+    'split-mbox', 'create-project', 'check-service-account', 'reindex-mbox']
   parser.add_argument('--action',
     choices=action_choices,
     dest='action',
@@ -900,7 +900,7 @@ def convertDB(sqlconn, uidvalidity, oldversion):
 
   print("GYB database converted to version %s" % __db_schema_version__)
 
-def getMessageIDs (sqlconn, backup_folder):
+def getMessageIDs(sqlconn, backup_folder):
   sqlcur = sqlconn.cursor()
   header_parser = email.parser.HeaderParser()
   for message_num, filename in sqlconn.execute('''
@@ -915,6 +915,42 @@ def getMessageIDs (sqlconn, backup_folder):
           'UPDATE messages SET rfc822_msgid = ? WHERE message_num = ?',
                      (msgid, message_num))
   sqlconn.commit()
+
+def reindexMbox(sqlconn, backup_folder):
+  resumedb = os.path.join(backup_folder, "%s-restored.sqlite" % options.email)
+  sqlconn.execute('ATTACH ? as mbox_resume', (resumedb,))
+  sqlcur = sqlconn.cursor()
+  sqlcur.execute('DROP TABLE IF EXISTS mbox_resume.mbox_messages')
+  sqlcur.executescript('''CREATE TABLE mbox_resume.mbox_messages
+                      (message_num TEXT PRIMARY KEY,
+                       message_filename TEXT,
+                       rfc822_msgid TEXT)''')
+  for path, subdirs, files in os.walk(backup_folder):
+    for filename in files:
+      if filename[-4:].lower() != '.mbx' and \
+        filename[-5:].lower() != '.mbox':
+        continue
+      file_path = '%s%s%s' % (path, path_divider, filename)
+      print("\nReindexing %s file %s..." % (humansize(file_path), file_path))
+      print("large files may take some time to open.")
+      mbox = mailbox.mbox(file_path)
+      current = 0
+      for message in mbox:
+        current += 1
+        msgid = message.get('message-id') or current
+        message_marker = '%s-%s' % (file_path, msgid)
+        request_id = hashlib.md5(message_marker.encode('utf-8')).hexdigest()
+        old_message_marker = '%s-%s' % (file_path, current)
+        old_request_id = hashlib.md5(old_message_marker.encode('utf-8')).hexdigest()[:25]
+        sqlcur.execute('''UPDATE restored_messages
+                          SET message_num = ?
+                          WHERE message_num = ?''',
+                          (request_id, old_request_id))
+        sqlcur.execute(
+          'INSERT OR IGNORE INTO mbox_messages (message_num, message_filename, rfc822_msgid) VALUES (?, ?, ?)',
+          (request_id, file_path, msgid))
+  sqlconn.commit()
+  sqlconn.execute('DETACH mbox_resume')
 
 def rebuildUIDTable(sqlconn):
   pass
@@ -1256,6 +1292,10 @@ def main(argv):
           rebuildUIDTable(sqlconn)
           sqlconn.commit()
           sys.exit(0)
+        if options.action == 'reindex-mbox':
+          reindexMbox(sqlconn, options.local_folder)
+          sqlconn.commit()
+          sys.exit(0)
 
   # BACKUP #
   if options.action == 'backup':
@@ -1509,15 +1549,15 @@ def main(argv):
         current = 0
         for message in mbox:
           current += 1
-          message_marker = '%s-%s' % (file_path, current)
+          msgid = message.get('message-id') or current
+          message_marker = '%s-%s' % (file_path, msgid)
           # shorten request_id to prevent content-id errors
-          request_id = hashlib.md5(message_marker.encode('utf-8')).hexdigest()[:25]
-          msgid = message.get('message-id') or '<DummyMsgID>'
-          sqlconn.execute(
-            'INSERT OR IGNORE INTO mbox_messages (message_num, message_filename, rfc822_msgid) VALUES (?, ?, ?)',
-            (request_id, filename, msgid))
+          request_id = hashlib.md5(message_marker.encode('utf-8')).hexdigest()
           if request_id in messages_to_skip:
             continue
+          sqlconn.execute(
+            'INSERT OR IGNORE INTO mbox_messages (message_num, message_filename, rfc822_msgid) VALUES (?, ?, ?)',
+            (request_id, file_path, msgid))
           labels = message['X-Gmail-Labels']
           if labels != None and labels != '' and not options.strip_labels:
             mybytes, encoding = email.header.decode_header(labels)[0]
