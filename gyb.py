@@ -939,7 +939,7 @@ def reindexMbox(sqlconn, backup_folder):
         current += 1
         msgid = message.get('message-id') or current
         message_marker = '%s-%s' % (file_path, msgid)
-        request_id = hashlib.md5(message_marker.encode('utf-8')).hexdigest()
+        request_id = hashlib.md5(message_marker.encode('utf-8')).hexdigest()[:25]
         old_message_marker = '%s-%s' % (file_path, current)
         old_request_id = hashlib.md5(old_message_marker.encode('utf-8')).hexdigest()[:25]
         sqlcur.execute('''UPDATE restored_messages
@@ -1552,7 +1552,7 @@ def main(argv):
           msgid = message.get('message-id') or current
           message_marker = '%s-%s' % (file_path, msgid)
           # shorten request_id to prevent content-id errors
-          request_id = hashlib.md5(message_marker.encode('utf-8')).hexdigest()
+          request_id = hashlib.md5(message_marker.encode('utf-8')).hexdigest()[:25]
           if request_id in messages_to_skip:
             continue
           sqlconn.execute(
